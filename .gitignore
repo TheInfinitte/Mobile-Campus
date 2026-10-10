@@ -1,0 +1,22 @@
+# Dependencies and build output - never commit these.
+node_modules/
+.next/
+out/
+build/
+
+# Environment secrets - keep these out of git, always.
+.env
+.env.local
+.env*.local
+
+# Logs
+npm-debug.log*
+yarn-error.log*
+
+# Editor / OS noise
+.DS_Store
+.vscode/
+.idea/
+
+# Prisma generated client
+prisma/generated/

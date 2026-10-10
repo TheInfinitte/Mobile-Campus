@@ -1,0 +1,1592 @@
+// ---------------------------------------------------------------------------
+// prisma/schema.prisma
+// WHAT: The complete database blueprint for Mobile Campus - now MULTI-CAMPUS.
+// WHY : Prisma reads this file and generates a type-safe database client for
+//       us. Every table (model) and every column (field) is commented so a new
+//       developer can understand the whole business without reading app code.
+//
+// MULTI-CAMPUS RULE:
+//   Every piece of student content (lodges, market items, gigs, roommate
+//   posts, community posts, study documents, projects) carries an
+//   institutionId. Queries ALWAYS filter by it, so a UNIBEN student never sees
+//   DELSU content and vice versa. Projects may opt into NATIONAL scope.
+//
+// IMPORTANT SECURITY NOTES:
+//   Sensitive identity numbers (matric number, JAMB registration number,
+//   national ID) are stored ENCRYPTED in *Enc columns. The plain values are
+//   never saved and never returned by the API.
+//   Anonymous community posts keep the real author userId in the database for
+//   moderation, but the public API never returns it for anonymous content.
+//   All money is stored in KOBO (whole numbers). Storing money as floats
+//   causes rounding bugs, so we never do that.
+// ---------------------------------------------------------------------------
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ===========================================================================
+// ENUMS - fixed lists of allowed values.
+// Using enums instead of free text stops typos from breaking the app logic.
+// ===========================================================================
+
+/// The kind of account a person has. Drives what they are allowed to do.
+enum UserRole {
+  STUDENT // An ordinary student (verified or provisional).
+  LANDLORD // A lodge owner or caretaker (direct or via an agent).
+  ADMIN // Mobile Campus staff (approvals, disputes, revenue, moderation).
+  // SUPER_ADMIN is a small number of platform owners. They are the ONLY role
+  // allowed to change another account's role or ban an admin. Everything an
+  // ADMIN can do, a SUPER_ADMIN can also do - never the other way round.
+  SUPER_ADMIN
+}
+
+/// Where a user is on the trust ladder.
+enum VerificationStatus {
+  UNVERIFIED // Signed up, nothing approved yet.
+  PROVISIONAL // Fresher: JAMB approved, can browse + shortlist only.
+  VERIFIED // Matric number approved (student) or documents approved (landlord).
+  REJECTED // An admin rejected the proof.
+}
+
+/// What kind of proof document a user uploaded.
+enum VerificationType {
+  STUDENT_ID // Matric number + photo of the school ID card.
+  FRESHER_JAMB // JAMB reg number + admission letter / portal screenshot.
+  LANDLORD_DOC // Ownership or caretaker management document.
+}
+
+/// WHY a verification record exists. INITIAL = first-time screening,
+/// MATRIC_UPGRADE = a fresher who got a matric number later and is upgrading.
+enum VerificationPurpose {
+  INITIAL
+  MATRIC_UPGRADE
+}
+
+/// Status of one verification request in the admin queue.
+enum VerificationStatusType {
+  PENDING
+  APPROVED
+  REJECTED
+  NEEDS_MORE_INFO // Admin asked the user to upload a clearer document.
+}
+
+/// Ownership class of an institution - shown on the pick-your-school screen.
+enum InstitutionType {
+  FEDERAL // e.g. University of Benin.
+  STATE // e.g. Delta State University.
+  PRIVATE // e.g. Pan-Atlantic University.
+}
+
+/// How a landlord account relates to the property being listed.
+enum LandlordType {
+  DIRECT // The owner themselves is on the app.
+  AGENT // A student rep / agent listing on behalf of an offline owner.
+}
+
+/// A lodge can be live, hidden by the landlord, or removed by an admin.
+enum LodgeStatus {
+  ACTIVE
+  INACTIVE
+  UNDER_REVIEW // Reported, waiting for an admin decision.
+  REMOVED
+}
+
+/// How the lodge gets its water. A big decision for Nigerian students.
+enum WaterSource {
+  BOREHOLE // Borehole with a pump - most reliable.
+  WELL // Hand-dug well.
+  TAP // Public / treated tap water.
+  NONE // Students fetch water themselves.
+}
+
+/// The electricity meter situation - affects how light bills are shared.
+enum MeterType {
+  PREPAID // Prepaid meter (token).
+  POSTPAID // Monthly bill from the distribution company.
+  GENERATOR // Landlord generator only.
+  NONE // No power connection.
+}
+
+/// Type of room being offered.
+enum RoomType {
+  SINGLE_SELF_CONTAIN // One room with its own bathroom + kitchen.
+  DOUBLE_SELF_CONTAIN
+  SINGLE_ROOM // Room only, shared facilities.
+  DOUBLE_ROOM
+  FLAT_2BED
+  FLAT_3BED
+  SHARED_ROOM // Two or more people in one room (cheapest).
+}
+
+/// Booking lifecycle for a viewing appointment.
+enum BookingStatus {
+  REQUESTED // Student asked to come and see the lodge.
+  CONFIRMED // Caretaker agreed to a time.
+  COMPLETED // The viewing happened.
+  CANCELLED
+  REJECTED
+}
+
+/// The six escrow states required by the product spec.
+enum EscrowState {
+  PENDING_PAYMENT // Invoice created, buyer has not paid yet.
+  HELD // Money is inside Mobile Campus / Flutterwave.
+  CONFIRMED // Buyer/tenant confirmed they received what they paid for.
+  RELEASED // Money sent to the seller / landlord.
+  DISPUTED // Someone complained - an admin must resolve it.
+  REFUNDED // Money returned to the payer.
+}
+
+/// What the escrow is protecting.
+enum EscrowType {
+  RENT // Paying for a lodge.
+  PURCHASE // Buying a market item.
+  SERVICE // Paying for a micro-gig.
+}
+
+/// Status of a micro-gig task.
+/// BIDIRECTIONAL GIGS: WANTED = "I need help" (student hiring),
+/// OFFERED = "I can help" (student advertising their own service).
+enum GigType {
+  WANTED
+  OFFERED
+}
+
+enum GigStatus {
+  OPEN // Looking for a worker.
+  ASSIGNED // A worker accepted.
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED // The poster closed it themselves.
+  // MODERATION STATES (only an admin sets these):
+  FLAGGED // A report came in. Still visible while an admin decides.
+  HIDDEN // An admin pulled it off the gig board. The poster can appeal.
+}
+
+/// Status of an item on the marketplace.
+enum MarketStatus {
+  AVAILABLE
+  RESERVED // Someone started an escrow payment.
+  SOLD
+  REMOVED // Seller took it down themselves.
+  // MODERATION STATES (only an admin sets these):
+  FLAGGED // A report came in. Still visible while an admin decides.
+  HIDDEN // An admin pulled it off the student board. The seller can appeal.
+}
+
+/// Status of a roommate board post.
+enum RoommatePostStatus {
+  OPEN
+  FILLED // All slots taken.
+  CLOSED // Poster closed it manually.
+  EXPIRED
+}
+
+/// Status of an application to join a roommate post.
+enum RoommateApplicationStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  WITHDRAWN
+}
+
+/// Lifecycle of a community (gist) board post or reply.
+enum CommunityPostStatus {
+  ACTIVE // Visible on the board.
+  REMOVED // Taken down by a moderator.
+}
+
+/// Who may see / join a collaboration project.
+enum ProjectScope {
+  SAME_SCHOOL // Physical or localised projects - own institution only.
+  NATIONAL // Tech / digital projects - open to students nationwide.
+}
+
+/// How far a project has gone - part of the public blind pitch.
+enum ProjectStage {
+  IDEA // Just the problem and a plan.
+  PROTOTYPE // Something rough exists.
+  MVP // A minimal product is live.
+  LAUNCHED // Real users / revenue.
+}
+
+/// Whether a project is still looking for teammates.
+enum ProjectStatus {
+  OPEN
+  CLOSED
+}
+
+/// Lifecycle of a request to join a project.
+enum ProjectApplicationStatus {
+  PENDING
+  APPROVED // Full details unlocked for this applicant.
+  DECLINED
+}
+
+/// Moderation state of an uploaded study document.
+enum StudyDocStatus {
+  PENDING // Waiting for an admin check (no downloads yet).
+  APPROVED // Live in the vault; uploader earned credits.
+  REJECTED
+}
+
+/// What kind of academic material a file is.
+enum MaterialKind {
+  PAST_QUESTION
+  LECTURE_NOTE
+  SLIDES
+  OTHER
+}
+
+/// Lifecycle of a peer-to-peer "please help me find this course material" post.
+enum MaterialRequestStatus {
+  OPEN
+  FILLED // A senior student supplied it.
+  CLOSED
+}
+
+/// Dispute lifecycle.
+enum DisputeStatus {
+  OPEN
+  UNDER_REVIEW
+  RESOLVED_FOR_PAYER // Refund the person who paid.
+  RESOLVED_FOR_PAYEE // Release the money to the seller/landlord.
+  CLOSED
+}
+
+/// Anything a user can report to admins.
+enum ReportType {
+  SCAM
+  HARASSMENT
+  FAKE_LISTING
+  INAPPROPRIATE
+  OTHER
+}
+
+enum ReportStatus {
+  OPEN
+  INVESTIGATING
+  RESOLVED
+  DISMISSED
+}
+
+/// The types of fee stored in FeeConfig (never hard-coded in the app).
+enum FeeType {
+  HOUSING_TENANT // 1% charged to the tenant on a booking.
+  HOUSING_LANDLORD // 1% charged to the landlord (total 2%).
+  ESCROW // 3% escrow fee for market items and gigs.
+  TRANSFER // Fixed cost per Flutterwave transfer/payout.
+}
+
+/// Who pays a particular fee.
+enum FeePayer {
+  PAYER // The buyer / tenant.
+  PAYEE // The seller / landlord.
+  SPLIT // Shared equally.
+}
+
+/// A money movement record. One escrow can have several payments
+/// (for example: a failed attempt, then a successful one, then a payout).
+enum TransactionKind {
+  COLLECTION // Money coming IN from a user.
+  TRANSFER // Money going OUT to a seller or landlord.
+  REFUND // Money returned to a user.
+}
+
+enum TransactionStatus {
+  INITIATED
+  SUCCESSFUL
+  FAILED
+  PENDING
+  REVERSED
+}
+
+/// How the money was paid.
+enum PaymentMethod {
+  FLUTTERWAVE_CARD
+  FLUTTERWAVE_BANK
+  FLUTTERWAVE_USSD
+  FLUTTERWAVE_TRANSFER
+  ESCROW_BALANCE
+}
+
+/// Delivery channel used for a notification.
+enum NotificationChannel {
+  IN_APP
+  SMS
+  EMAIL
+}
+
+/// Where a budget request came from. Lets us fall back to plain database
+/// filters if the AI provider is down.
+enum BudgetSource {
+  AI // Parsed by Claude.
+  FALLBACK // Parsed by our own regex parser.
+}
+
+// ===========================================================================
+// MODELS (tables)
+// ===========================================================================
+
+/// A Nigerian higher institution on the platform. This is the silo boundary:
+/// every student-facing listing carries institutionId and queries filter by it.
+model Institution {
+  id             String          @id @default(cuid())
+  name           String          @unique // "Delta State University, Abraka"
+  shortName      String          @unique // "DELSU"
+  slug           String          @unique // "delsu-abraka"
+  type           InstitutionType
+  city           String
+  state          String
+  // Community / area names students search for at THIS school. Each campus
+  // has its own neighbourhoods, so areas live here, not in a global list.
+  areas          String[]        @default([])
+  // SEARCHABLE ONBOARDING: extra words students type when looking for this
+  // school - abbreviations, old names, city nicknames ("DELSU", "Abraka",
+  // "Delta State"). The sign-up autocomplete matches against these too.
+  searchAliases  String[]        @default([])
+  isActive       Boolean         @default(true)
+  // Free downloads granted to each newly verified fresher (welcome credit).
+  welcomeCredits Int             @default(3)
+
+  createdAt DateTime @default(now())
+
+  users            User[]
+  lodges           Lodge[]
+  marketItems      MarketItem[]
+  gigs             Gig[]
+  roommatePosts    RoommatePost[]
+  communityPosts   CommunityPost[]
+  projects         Project[]
+  studyDocuments   StudyDocument[]
+  materialRequests MaterialRequest[]
+  foodVendors      FoodVendor[]
+  errands          Errand[]
+  goodwillRequests GoodwillRequest[]
+
+  @@index([isActive])
+}
+
+/// A person who uses Mobile Campus: student, landlord or admin.
+model User {
+  id           String   @id @default(cuid())
+  // Phone is the primary way to log in. Kept in Nigerian format 08012345678.
+  phone        String   @unique
+  email        String?  @unique
+  // bcrypt hash of the password. Never store a plain password.
+  passwordHash String
+  fullName     String
+  role         UserRole @default(STUDENT)
+
+  // The institution this account belongs to. Chosen at sign-up and used to
+  // silo every query. Admins belong to the platform's first institution.
+  institutionId String
+  institution   Institution @relation(fields: [institutionId], references: [id])
+
+  // True only when the account has been screened by an admin and can pay.
+  isVerified         Boolean            @default(false)
+  // Where this user sits on the trust ladder (see VerificationStatus).
+  verificationStatus VerificationStatus @default(UNVERIFIED)
+  // True when the user ticked the NDPA data-consent box at sign-up.
+  consentedToData    Boolean            @default(false)
+
+  // AES-256-GCM encrypted matric number. Filled only after an admin approves
+  // the student's ID card - for freshers it lands when their JAMB provisional
+  // account is upgraded with a real matric number. Never sent to the client.
+  matricNumberEnc String?
+
+  avatarUrl      String?
+  // A short tagline shown on the roommate board, e.g. "200L Computer Science".
+  bio            String?
+  department     String?
+  level          String? // e.g. "100L", "400L", "Final Year"
+  // "male" | "female". Used ONLY to enforce same-gender roommate matching.
+  gender         String?
+  whatsAppNumber String?
+
+  // --- Landlord-mode fields (ignored for students) ---
+  // DIRECT = the owner themselves, AGENT = listing for an offline owner.
+  landlordType   LandlordType @default(DIRECT)
+  // When landlordType = AGENT: the real owner's name + phone, shown on the
+  // listing badge for full transparency ("managed on behalf of ...").
+  principalName  String?
+  principalPhone String?
+
+  // Skills the student offers, used by the project hub to suggest teams
+  // that need them, e.g. ["Developer", "Designer"].
+  skills String[] @default([])
+
+  // --- Study Vault economy ---
+  // Downloads left. Freshers receive institution.welcomeCredits on approval;
+  // approved uploads earn more (give-to-get).
+  studyDownloadsLeft   Int @default(0)
+  // How many of this user's uploads an admin has approved.
+  studyUploadsApproved Int @default(0)
+
+  // OTP throttling: the time this number may request another SMS code.
+  lastOtpAt   DateTime?
+  otpAttempts Int       @default(0)
+
+  // --- ADMIN MODERATION / SUSPENSION ---
+  // bannedUntil: while this date is in the future the account cannot sign in.
+  //   Null means "not banned". We store a date (not a boolean) so bans expire
+  //   by themselves and nobody has to remember to switch an account back on.
+  bannedUntil DateTime?
+  // The plain-English reason shown to the user when they are blocked, and to
+  // the admin who lifted it later. Never empty when bannedUntil is set.
+  banReason   String?
+  // Who applied the ban (admin's userId). Kept for the audit trail.
+  bannedById  String?
+  bannedBy    User?    @relation("UserBans", fields: [bannedById], references: [id], onDelete: SetNull)
+  // Every ban this account has handed out to other people (audit trail).
+  bansIssued  User[]   @relation("UserBans")
+  // Free-form note only admins see, e.g. "repeat counterfeit seller".
+  adminNote   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // --- Relations (other tables that belong to this user) ---
+  verificationRecords  VerificationRecord[]
+  lodges               Lodge[]               @relation("LandlordLodges")
+  reviews              Review[]
+  viewingRequests      ViewingRequest[]
+  roommateProfile      RoommateProfile?
+  roommatePosts        RoommatePost[]
+  roommateApplications RoommateApplication[]
+  marketItems          MarketItem[]
+  gigsPosted           Gig[]                 @relation("GigPoster")
+  gigsTaken            Gig[]                 @relation("GigWorker")
+  escrowsAsPayer       EscrowTransaction[]   @relation("EscrowPayer")
+  escrowsAsPayee       EscrowTransaction[]   @relation("EscrowPayee")
+  payments             Payment[]
+  disputesRaised       Dispute[]             @relation("DisputeRaisedBy")
+  disputesAssigned     Dispute[]             @relation("DisputeAssignedTo")
+  reportsFiled         Report[]              @relation("ReportedBy")
+  reportsAbout         Report[]              @relation("ReportedUser")
+  // Content this admin has acted on (moderation audit trail).
+  marketItemsModerated MarketItem[]          @relation("MarketItemModeration")
+  gigsModerated        Gig[]                 @relation("GigModeration")
+  notifications        Notification[]
+  shortlists           Shortlist[]
+  splitShares          SplitShare[]
+  budgetSessions       BudgetSession[]
+  moveInChecklists     ConditionChecklist[]
+  communityPosts       CommunityPost[]
+  communityReplies     CommunityReply[]
+
+  // Food directory: spots this student suggested and the reviews they wrote.
+  foodSuggestions     FoodVendor[]         @relation("FoodSuggestedBy")
+  foodReviews         FoodReview[]
+  // Errands: tasks this student posted and tasks they claimed as a mover.
+  errandsPosted       Errand[]             @relation("ErrandPoster")
+  errandsClaimed      Errand[]             @relation("ErrandClaimer")
+
+  // URGENT 2K GOODWILL BOARD: requests this student posted, the ones they
+  // offered to help with, and their private goodwill record.
+  goodwillPosted      GoodwillRequest[]    @relation("GoodwillRequester")
+  goodwillHelped      GoodwillHelp[]       @relation("GoodwillHelper")
+  goodwillRecord      GoodwillRecord?
+  projects            Project[]            @relation("ProjectOwner")
+  projectApplications ProjectApplication[] @relation("ProjectApplicant")
+  studyDocuments      StudyDocument[]
+  materialRequests    MaterialRequest[]
+
+  @@index([role])
+  @@index([verificationStatus])
+  @@index([institutionId])
+}
+
+/// One uploaded proof document (student ID, JAMB letter, landlord document).
+/// Admins review these in the verification queue.
+model VerificationRecord {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type    VerificationType
+  status  VerificationStatusType @default(PENDING)
+  // INITIAL screening or a later JAMB -> matric upgrade. Lets the admin queue
+  // show "Matric upgrade" and the approval code know what to update.
+  purpose VerificationPurpose    @default(INITIAL)
+
+  // Encrypted at rest. These are personal data under the NDPA.
+  matricNumberEnc  String?
+  jambRegNumberEnc String?
+  nationalIdEnc    String?
+
+  // Last 4 characters kept in plain text so admins can search quickly
+  // without decrypting every row (e.g. "...4821").
+  identifierLast4 String?
+
+  // The student ID card image itself (required for student submissions).
+  // Kept separate from documentUrls so the UI can demand it specifically.
+  idCardUrl String?
+
+  // Cloudinary URLs of the extra proof images (admission letter, documents).
+  documentUrls String[]  @default([])
+  // The phone number the OTP was sent to for this submission.
+  phoneNumber  String?
+  // Free text note from the admin (reason for rejection, what to re-upload).
+  adminNote    String?
+  reviewedById String?
+  reviewedAt   DateTime?
+  submittedAt  DateTime  @default(now())
+
+  @@index([status])
+  @@index([type])
+  @@index([userId])
+}
+
+/// A lodge (off-campus accommodation). Belongs to ONE institution.
+model Lodge {
+  id         String @id @default(cuid())
+  landlordId String
+  landlord   User   @relation("LandlordLodges", fields: [landlordId], references: [id], onDelete: Cascade)
+
+  // Silo boundary: only students of this institution see this lodge.
+  institutionId String
+  institution   Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+
+  title       String
+  description String
+  // Community names come from Institution.areas (each campus has its own).
+  area        String
+  address     String
+  city        String
+  state       String
+
+  // Money is stored in kobo (1 naira = 100 kobo).
+  monthlyRentKobo    Int
+  annualRentKobo     Int
+  cautionDepositKobo Int @default(0) // Refundable deposit - a common dispute source.
+
+  roomType    RoomType
+  waterSource WaterSource
+  meterType   MeterType
+  // Extra notes, e.g. "Borehole water is free, light is prepaid".
+  waterNote   String?
+  lightNote   String?
+
+  // Distance in metres from key campus points. Used by the distance filter
+  // and by the AI assistant to explain "5 minutes walk to the gate".
+  distanceToMainGateMeters Int?
+  distanceToFacultyMeters  Int?
+  distanceToMarketMeters   Int?
+
+  amenities      String[] @default([]) // e.g. ["Furnished", "Security", "WiFi"]
+  availableRooms Int      @default(1)
+  maxOccupancy   Int      @default(1)
+
+  // Landlord / caretaker contact details shown on the listing.
+  caretakerName  String?
+  caretakerPhone String?
+
+  // True only after an admin has approved the landlord's documents.
+  isVerified Boolean @default(false)
+
+  // SPONSORED LISTING HOOK: landlords can pay to pin a listing to the top
+  // of search results until sponsoredUntil passes.
+  isSponsored    Boolean   @default(false)
+  sponsoredUntil DateTime?
+
+  status LodgeStatus @default(ACTIVE)
+
+  ratingAverage Float @default(0) // Cached average rating (0-5) so listing pages are fast.
+  ratingCount   Int   @default(0)
+
+  // Approximate map position (optional).
+  latitude  Float?
+  longitude Float?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  images          LodgeImage[]
+  reviews         Review[]
+  viewingRequests ViewingRequest[]
+  escrows         EscrowTransaction[]
+  shortlists      Shortlist[]
+  reports         Report[]
+  checklists      ConditionChecklist[]
+
+  @@index([area])
+  @@index([status, monthlyRentKobo])
+  @@index([landlordId])
+  @@index([institutionId])
+}
+
+/// A photo belonging to a lodge. Stored separately so a lodge can have many
+/// photos and we can reorder them (cover image first).
+model LodgeImage {
+  id      String @id @default(cuid())
+  lodgeId String
+  lodge   Lodge  @relation(fields: [lodgeId], references: [id], onDelete: Cascade)
+
+  // Cloudinary "secure url" of the compressed image.
+  url       String
+  // Public id returned by Cloudinary - needed if we ever delete the file.
+  publicId  String?
+  altText   String?
+  isCover   Boolean @default(false)
+  sortOrder Int     @default(0)
+
+  @@index([lodgeId])
+}
+
+/// A review written by a verified past tenant. Only verified users who have a
+/// completed escrow for this lodge may write one (checked in the API route).
+model Review {
+  id      String @id @default(cuid())
+  lodgeId String
+  lodge   Lodge  @relation(fields: [lodgeId], references: [id], onDelete: Cascade)
+  userId  String
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  rating           Int // 1 to 5
+  safety           Int? // 1 to 5 - how safe the area feels
+  cleanliness      Int? // 1 to 5
+  comment          String
+  // True when the reviewer proved they actually lived here.
+  isVerifiedTenant Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  @@unique([lodgeId, userId]) // One review per person per lodge.
+  @@index([lodgeId])
+}
+
+/// A student asking the caretaker for a time to come and see the lodge.
+model ViewingRequest {
+  id      String @id @default(cuid())
+  lodgeId String
+  lodge   Lodge  @relation(fields: [lodgeId], references: [id], onDelete: Cascade)
+  userId  String
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  preferredDate  DateTime
+  message        String?
+  status         BookingStatus @default(REQUESTED)
+  caretakerReply String?
+  respondedAt    DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([lodgeId])
+  @@index([userId])
+}
+
+/// Answers to the roommate compatibility questionnaire.
+/// Optional one-to-one with User.
+model RoommateProfile {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Sleep pattern: when do you read and when do you sleep?
+  sleepSchedule  String // "night-reader" | "early-sleeper" | "flexible"
+  studyStyle     String // "alone-quiet" | "group-study" | "library"
+  cleanliness    Int      @default(3) // 1 = messy, 5 = very neat
+  noiseTolerance Int      @default(3) // 1 = needs silence, 5 = fine with noise
+  budgetKobo     Int // Maximum monthly rent this person can pay.
+  smokes         Boolean  @default(false)
+  hasPets        Boolean  @default(false)
+  hasGenerator   Boolean  @default(false)
+  hasFridge      Boolean  @default(false)
+  aboutMe        String?
+  // Areas this person is willing to stay in.
+  preferredAreas String[] @default([])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  posts RoommatePost[]
+}
+
+/// A post on the Roommate Board: "3 of us need one more person for a 4-room
+/// self-contain in Ekrejeta, budget 40k each". Matching is same-gender only,
+/// enforced with the author's User.gender in every query and check.
+model RoommatePost {
+  id        String           @id @default(cuid())
+  authorId  String
+  author    User             @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  profileId String?
+  profile   RoommateProfile? @relation(fields: [profileId], references: [id], onDelete: SetNull)
+
+  // Silo boundary for roommate matching.
+  institutionId String
+  institution   Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+
+  title               String
+  description         String
+  area                String
+  // Total people the group wants (including the author).
+  groupSize           Int                @default(2)
+  // How many more people are still needed.
+  slotsLeft           Int                @default(1)
+  // Budget per person, in kobo.
+  budgetPerPersonKobo Int
+  moveInDate          DateTime?
+  status              RoommatePostStatus @default(OPEN)
+  // When this post stops showing in search results.
+  expiresAt           DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  applications RoommateApplication[]
+
+  @@index([status, area])
+  @@index([institutionId])
+}
+
+/// Someone applying to join a roommate post.
+model RoommateApplication {
+  id     String       @id @default(cuid())
+  postId String
+  post   RoommatePost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  userId String
+  user   User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  status             RoommateApplicationStatus @default(PENDING)
+  message            String?
+  // Compatibility score (0-100) calculated when the application is created.
+  compatibilityScore Int?
+
+  createdAt DateTime @default(now())
+
+  @@unique([postId, userId]) // Cannot apply twice to the same post.
+  @@index([postId])
+}
+
+/// An item for sale on the P2P marketplace, including the
+/// "Graduating Student Drop" (final-year students selling fast).
+model MarketItem {
+  id       String @id @default(cuid())
+  sellerId String
+  seller   User   @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  // Silo boundary: buyers from other schools never see this item.
+  institutionId String
+  institution   Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+
+  title             String
+  description       String
+  // Category examples: Generator, Mattress, Fan, Gas Cylinder, Books.
+  category          String
+  priceKobo         Int
+  // A lower price the seller would accept, used by the AI assistant.
+  negotiableMinKobo Int?
+  condition         String  @default("Used") // "New" | "Used" | "Fairly used"
+  area              String
+  pickupNote        String?
+
+  images String[] @default([])
+
+  // True when the seller is a final-year student clearing out.
+  isGraduatingDrop Boolean @default(false)
+
+  status MarketStatus @default(AVAILABLE)
+  views  Int          @default(0)
+
+  // --- ADMIN MODERATION ---
+  // Why this item was flagged/hidden, and who did it. Shown to the seller so
+  // they know what to fix, and to admins as an audit trail.
+  moderationNote String?
+  flaggedAt      DateTime?
+  moderatedById  String?
+  moderatedBy    User?    @relation("MarketItemModeration", fields: [moderatedById], references: [id], onDelete: SetNull)
+
+  // SPONSORED LISTING HOOK: sellers can pay to pin an item to the top.
+  isSponsored    Boolean   @default(false)
+  sponsoredUntil DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  escrows    EscrowTransaction[]
+  reports    Report[]
+  shortlists Shortlist[]
+
+  @@index([category])
+  @@index([status, priceKobo])
+  @@index([isGraduatingDrop])
+  @@index([institutionId])
+}
+
+/// FOOD DIRECTORY: a student-suggested spot starts as SUGGESTED and only goes
+/// live on the directory after an admin checks it. REMOVED hides it again.
+enum FoodVendorStatus {
+  SUGGESTED
+  ACTIVE
+  REMOVED
+}
+
+/// ERRANDS: a claimed task belongs to one mover until it is done or cancelled.
+enum ErrandStatus {
+  OPEN // Waiting for someone to claim it.
+  CLAIMED // A mover accepted and is on the way.
+  COMPLETED // The poster confirmed the drop-off.
+  CANCELLED
+}
+
+/// URGENT 2K: lifecycle of a goodwill request on the student support board.
+/// OPEN         = posted, anonymous, waiting for someone to commit.
+/// COMMITTED    = a helper accepted the commitment notice, details revealed,
+///                the 2-hour transfer timer is running.
+/// SENT         = the helper says the money has left their bank app; the
+///                recipient now confirms.
+/// RECEIVED     = the recipient confirmed. The loop is closed.
+/// RELEASED     = the recipient let the helper off the hook (they said the
+///                money is not needed or never arrived, no penalty).
+/// CANCELLED    = the recipient withdrew the request.
+enum GoodwillStatus {
+  OPEN
+  COMMITTED
+  SENT
+  RECEIVED
+  RELEASED
+  CANCELLED
+}
+
+/// A micro-gig: laundry, hair styling, food runs, tutoring and so on.
+model Gig {
+  id       String  @id @default(cuid())
+  posterId String
+  poster   User    @relation("GigPoster", fields: [posterId], references: [id], onDelete: Cascade)
+  // The person doing the job, filled in when a worker accepts.
+  workerId String?
+  worker   User?   @relation("GigWorker", fields: [workerId], references: [id], onDelete: SetNull)
+
+  // Silo boundary for gig work.
+  institutionId String
+  institution   Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+
+  // Which side of the board this post sits on: services wanted or offered.
+  gigType GigType @default(WANTED)
+
+  title        String
+  description  String
+  // Category examples: Laundry, Tutoring, Cleaning (WANTED) or Hair, Tech
+  // Support, Laundry (OFFERED). See GIG_CATEGORIES / SERVICE_CATEGORIES.
+  category     String
+  area         String
+  budgetKobo   Int
+  // True when the poster is open to negotiating the price.
+  isNegotiable Boolean   @default(false)
+  dueDate      DateTime?
+  status       GigStatus @default(OPEN)
+
+  // --- ADMIN MODERATION ---
+  // Same idea as MarketItem: a reason plus who acted on it.
+  moderationNote String?
+  flaggedAt      DateTime?
+  moderatedById  String?
+  moderatedBy    User?    @relation("GigModeration", fields: [moderatedById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  escrows    EscrowTransaction[]
+  reports    Report[]
+  shortlists Shortlist[]
+
+  // SPONSORED LISTING HOOK: a boosted gig is pinned to the top of the board
+  // until sponsoredUntil passes. Monetisation reads this flag, nothing else.
+  isSponsored    Boolean   @default(false)
+  sponsoredUntil DateTime?
+
+  @@index([category])
+  @@index([status])
+  @@index([gigType, status])
+  @@index([institutionId])
+}
+
+/// A post on the moderated community (gist) board. Real identity by default;
+/// optional anonymous mode shows a generated alias while the true authorId
+/// stays in the database for moderators only.
+model CommunityPost {
+  id       String @id @default(cuid())
+  authorId String
+  author   User   @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  institutionId String
+  institution   Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+
+  // Topic chip, e.g. "Confessions", "Campus gist", "Study tips".
+  topic       String?
+  body        String
+  // Anonymous mode: frontend shows alias, never the author. The authorId
+  // column above remains for moderation - it is simply not sent to clients.
+  isAnonymous Boolean @default(false)
+  alias       String? // e.g. "Anonymous Student #4821"
+
+  status CommunityPostStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  replies CommunityReply[]
+  reports Report[]
+
+  @@index([institutionId, status])
+}
+
+/// A reply under a community post. Same anonymity rules as the post.
+model CommunityReply {
+  id       String        @id @default(cuid())
+  postId   String
+  post     CommunityPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  authorId String
+  author   User          @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  body        String
+  isAnonymous Boolean             @default(false)
+  alias       String?
+  status      CommunityPostStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now())
+
+  @@index([postId])
+}
+
+/// A blind-pitch collaboration listing. Public fields are deliberately vague
+/// (problem, domain, stage, skills) so ideas are not stolen; fullDetails is
+/// released only after the owner approves an application.
+model Project {
+  id      String @id @default(cuid())
+  ownerId String
+  owner   User   @relation("ProjectOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+
+  // The owner's school. Used as the visibility boundary when scope = SAME_SCHOOL.
+  institutionId String
+  institution   Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+
+  title        String
+  // PUBLIC teaser fields (safe to show everyone):
+  problem      String // The problem being solved, high level.
+  domain       String // e.g. "EdTech", "Fintech", "Health".
+  stage        ProjectStage
+  skillsNeeded String[] // e.g. ["Developer", "Designer"]
+  scope        ProjectScope
+
+  // PRIVATE until approved: the full pitch, plan and contact note.
+  fullDetails String
+  contactNote String?
+
+  status    ProjectStatus @default(OPEN)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  applications ProjectApplication[]
+
+  @@index([institutionId])
+  @@index([scope, status])
+}
+
+/// A request to join a project. Approval unlocks fullDetails for this user.
+model ProjectApplication {
+  id          String  @id @default(cuid())
+  projectId   String
+  project     Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  applicantId String
+  applicant   User    @relation("ProjectApplicant", fields: [applicantId], references: [id], onDelete: Cascade)
+
+  message       String
+  // What the applicant brings, matched against skillsNeeded.
+  skillsOffered String[]                 @default([])
+  status        ProjectApplicationStatus @default(PENDING)
+  decidedAt     DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@unique([projectId, applicantId])
+  @@index([projectId])
+}
+
+/// A crowdsourced past question / lecture note. Siloed by institution AND
+/// department so materials always match the reader's school curriculum.
+model StudyDocument {
+  id         String @id @default(cuid())
+  uploaderId String
+  uploader   User   @relation(fields: [uploaderId], references: [id], onDelete: Cascade)
+
+  institutionId String
+  institution   Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+
+  department  String // e.g. "Computer Science"
+  courseCode  String // e.g. "CSC 201"
+  title       String
+  kind        MaterialKind
+  description String?
+  // Cloudinary url of the PDF / image set.
+  fileUrl     String
+  // Optional size / page info shown before download.
+  pages       Int?
+
+  status    StudyDocStatus @default(PENDING)
+  downloads Int            @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([institutionId, department])
+  @@index([status])
+}
+
+/// Peer-to-peer request board: a fresher asks seniors "please share
+/// CSC 101 past questions". A senior fulfils it by uploading the document.
+model MaterialRequest {
+  id          String @id @default(cuid())
+  requesterId String
+  requester   User   @relation(fields: [requesterId], references: [id], onDelete: Cascade)
+
+  institutionId String
+  institution   Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+
+  department       String
+  courseCode       String
+  details          String?
+  status           MaterialRequestStatus @default(OPEN)
+  // The approved study document that fulfilled this request, if any.
+  fulfilledByDocId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([institutionId, status])
+}
+
+/// The heart of the platform: money held safely until the buyer or tenant
+/// confirms. One escrow = one deal. Group rentals create one escrow with
+/// several SplitShare rows.
+model EscrowTransaction {
+  id        String @id @default(cuid())
+  // Human-friendly reference shown to users, e.g. MC-8F3K2A.
+  reference String @unique @default(cuid())
+
+  type  EscrowType
+  state EscrowState @default(PENDING_PAYMENT)
+
+  payerId String
+  payer   User   @relation("EscrowPayer", fields: [payerId], references: [id])
+  payeeId String
+  payee   User   @relation("EscrowPayee", fields: [payeeId], references: [id])
+
+  // Exactly one of these is set, depending on `type`.
+  lodgeId      String?
+  lodge        Lodge?      @relation(fields: [lodgeId], references: [id], onDelete: SetNull)
+  marketItemId String?
+  marketItem   MarketItem? @relation(fields: [marketItemId], references: [id], onDelete: SetNull)
+  gigId        String?
+  gig          Gig?        @relation(fields: [gigId], references: [id], onDelete: SetNull)
+
+  // Money maths (all kobo). The breakdown is stored so a user can always
+  // see exactly what they paid, even months later.
+  itemAmountKobo Int // Rent / item price / gig fee
+  cautionKobo    Int @default(0)
+  // Our platform fee for this deal (from FeeConfig at the time of payment).
+  feeKobo        Int @default(0)
+  totalKobo      Int // What the payer actually paid
+  // Amount that will be transferred to the seller/landlord on release.
+  payoutKobo     Int @default(0)
+
+  // Snapshot of the fee rule used, e.g. "2% housing split 1%/1%".
+  feeSnapshot String?
+
+  // Period covered, for rentals.
+  periodStart DateTime?
+  periodEnd   DateTime?
+
+  // Flutterwave identifiers for the collection and the payout.
+  flwTxRef         String?
+  flwTransactionId String?
+  payoutReference  String?
+  payoutAt         DateTime?
+
+  confirmedAt DateTime?
+  releasedAt  DateTime?
+  refundedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  payments    Payment[]
+  dispute     Dispute?
+  splitShares SplitShare[]
+
+  @@index([payerId])
+  @@index([payeeId])
+  @@index([state])
+}
+
+/// Every money movement, including failed attempts. Kept separate from the
+/// escrow so we have a complete audit trail.
+model Payment {
+  id String @id @default(cuid())
+
+  escrowId String?
+  escrow   EscrowTransaction? @relation(fields: [escrowId], references: [id], onDelete: SetNull)
+  userId   String
+  user     User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  kind   TransactionKind
+  status TransactionStatus @default(INITIATED)
+  method PaymentMethod     @default(FLUTTERWAVE_CARD)
+
+  // Our own unique reference sent to Flutterwave.
+  reference  String @unique
+  amountKobo Int
+  feeKobo    Int    @default(0)
+  currency   String @default("NGN")
+
+  // Flutterwave's own identifiers, saved from the webhook/verify call.
+  flwTransactionId String?
+  flwReference     String?
+  providerResponse String?
+
+  paidAt    DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([userId])
+  @@index([status])
+}
+
+/// A complaint about an escrow, opened by the payer or the payee.
+model Dispute {
+  id       String            @id @default(cuid())
+  escrowId String            @unique
+  escrow   EscrowTransaction @relation(fields: [escrowId], references: [id], onDelete: Cascade)
+
+  raisedById   String
+  raisedBy     User    @relation("DisputeRaisedBy", fields: [raisedById], references: [id])
+  assignedToId String?
+  assignedTo   User?   @relation("DisputeAssignedTo", fields: [assignedToId], references: [id], onDelete: SetNull)
+
+  reason       String
+  details      String
+  // Cloudinary URLs of evidence screenshots.
+  evidenceUrls String[] @default([])
+
+  status     DisputeStatus @default(OPEN)
+  resolution String?
+  resolvedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+}
+
+/// A user report: scam, fake listing, harassment, bad community post.
+/// Feeds the admin queue.
+model Report {
+  id String @id @default(cuid())
+
+  reporterId     String
+  reporter       User    @relation("ReportedBy", fields: [reporterId], references: [id])
+  reportedUserId String?
+  reportedUser   User?   @relation("ReportedUser", fields: [reportedUserId], references: [id], onDelete: SetNull)
+
+  type    ReportType
+  status  ReportStatus @default(OPEN)
+  details String
+
+  // The thing being reported (at most one of these is set).
+  lodgeId         String?
+  lodge           Lodge?         @relation(fields: [lodgeId], references: [id], onDelete: SetNull)
+  marketItemId    String?
+  marketItem      MarketItem?    @relation(fields: [marketItemId], references: [id], onDelete: SetNull)
+  gigId           String?
+  gig             Gig?           @relation(fields: [gigId], references: [id], onDelete: SetNull)
+  communityPostId String?
+  communityPost   CommunityPost? @relation(fields: [communityPostId], references: [id], onDelete: SetNull)
+
+  adminNote  String?
+  resolvedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([status])
+  @@index([type])
+}
+
+/// Platform fees. NEVER hard-code fees in the app - admins edit them here and
+/// the code reads this table every time a price is calculated.
+model FeeConfig {
+  id          String   @id @default(cuid())
+  key         String   @unique // e.g. "HOUSING_TENANT"
+  type        FeeType
+  label       String // Shown to the user in the fee breakdown.
+  // Percentage as a whole number: 1 means 1%, 3 means 3%.
+  percent     Int      @default(0)
+  // Fixed amount in kobo, added on top of the percentage.
+  fixedKobo   Int      @default(0)
+  // The smallest fee we will ever charge, so tiny deals still cover
+  // Flutterwave's own cost. In kobo.
+  minimumKobo Int      @default(0)
+  // The largest fee we will ever charge, in kobo. 0 means no cap.
+  maximumKobo Int      @default(0)
+  payer       FeePayer @default(PAYER)
+  isActive    Boolean  @default(true)
+
+  updatedAt DateTime @updatedAt
+
+  @@index([type])
+}
+
+/// In-app and SMS notifications.
+model Notification {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  title   String
+  body    String
+  // Deep link inside the app, e.g. "/escrow/MC-8F3K2A".
+  link    String?
+  channel NotificationChannel @default(IN_APP)
+  isRead  Boolean             @default(false)
+  readAt  DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, isRead])
+}
+
+/// One saved lodge, item or gig. Used by "My shortlist" and by the AI
+/// assistant to remember what the user liked.
+model Shortlist {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  lodgeId      String?
+  lodge        Lodge?      @relation(fields: [lodgeId], references: [id], onDelete: Cascade)
+  marketItemId String?
+  marketItem   MarketItem? @relation(fields: [marketItemId], references: [id], onDelete: Cascade)
+  gigId        String?
+  gig          Gig?        @relation(fields: [gigId], references: [id], onDelete: Cascade)
+
+  // Which roommate group this shortlist belongs to (group renting together).
+  roommatePostId String?
+  note           String?
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, lodgeId])
+  @@unique([userId, marketItemId])
+  @@unique([userId, gigId])
+  @@index([userId])
+}
+
+/// One person's share of a group rental. Each share is tracked and paid
+/// separately, so nobody has to chase their friends for money.
+model SplitShare {
+  id       String            @id @default(cuid())
+  escrowId String
+  escrow   EscrowTransaction @relation(fields: [escrowId], references: [id], onDelete: Cascade)
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  amountKobo Int
+  feeKobo    Int       @default(0)
+  isPaid     Boolean   @default(false)
+  paidAt     DateTime?
+
+  @@unique([escrowId, userId]) // One share per person per escrow.
+  @@index([userId])
+}
+
+/// Move-in / move-out condition checklist. Both parties tick the same list so
+/// a caution deposit cannot be argued about later.
+model ConditionChecklist {
+  id       String  @id @default(cuid())
+  escrowId String?
+  lodgeId  String
+  lodge    Lodge   @relation(fields: [lodgeId], references: [id], onDelete: Cascade)
+  userId   String
+  user     User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  phase            String // "MOVE_IN" | "MOVE_OUT"
+  // Stored as JSON text: [{ "item": "Door lock", "ok": true, "note": "..." }]
+  itemsJson        String
+  // Photo evidence of the room condition.
+  photoUrls        String[] @default([])
+  signedByTenant   Boolean  @default(false)
+  signedByLandlord Boolean  @default(false)
+
+  createdAt DateTime @default(now())
+
+  @@index([lodgeId])
+}
+
+/// A saved AI budget conversation. Lets a student come back to an earlier
+/// plan and lets us measure how useful the assistant is.
+model BudgetSession {
+  id     String  @id @default(cuid())
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  // What the user typed, e.g. "I have 150k, need a room under 80k and a fan".
+  prompt      String
+  // Structured JSON returned by Claude (amounts, categories, preferences).
+  parsedJson  String
+  // The results we found in the real database, as JSON.
+  resultsJson String
+  source      BudgetSource @default(AI)
+  // Milliseconds the AI call took - helps us keep the UI fast.
+  latencyMs   Int?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+// ===========================================================================
+// FOOD DIRECTORY (showcase model - NO cart, NO in-app checkout)
+// ===========================================================================
+
+/// FOOD DIRECTORY: a curated card for a food spot near campus. Students order
+/// straight through WhatsApp or visit the vendor's own website - Mobile Campus
+/// never touches the food order or the money, so there is no cart and no
+/// delivery engine to maintain. Vendors can pay for a sponsored slot.
+model FoodVendor {
+  id            String      @id @default(cuid())
+  institutionId String
+  institution   Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+
+  name           String
+  description    String
+  // e.g. ["Rice & Swallow", "Grills", "Drinks"] - powers the filter chips.
+  categories     String[] @default([])
+  // Honest price estimate shown on the card, e.g. ₦1,500 - ₦3,000 per plate.
+  priceMinKobo   Int
+  priceMaxKobo   Int
+  // The two primary actions: order by WhatsApp, or visit their own website.
+  whatsAppNumber String
+  websiteUrl     String?
+  imageUrl       String?
+  area           String
+
+  // SUGGESTED until an admin approves the submission.
+  status        FoodVendorStatus @default(SUGGESTED)
+  // Which student suggested this spot (kept even when anonymous to others).
+  suggestedById String?
+  suggestedBy   User?            @relation("FoodSuggestedBy", fields: [suggestedById], references: [id], onDelete: SetNull)
+  adminNote     String?
+
+  // SPONSORED SLOT HOOK: paid placement at the top of the directory.
+  isSponsored    Boolean   @default(false)
+  sponsoredUntil DateTime?
+
+  views   Int          @default(0)
+  reviews FoodReview[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([institutionId, status])
+  @@index([isSponsored])
+}
+
+/// A short star rating + comment from a student who actually ate there.
+model FoodReview {
+  id       String     @id @default(cuid())
+  vendorId String
+  vendor   FoodVendor @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  userId   String
+  user     User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  rating  Int // 1 to 5
+  comment String
+
+  createdAt DateTime @default(now())
+
+  @@unique([vendorId, userId]) // One review per student per spot.
+  @@index([vendorId])
+}
+
+// ===========================================================================
+// CAMPUS ERRANDS (strictly NON-FOOD peer-to-peer logistics)
+// ===========================================================================
+
+/// ERRANDS: small physical tasks - dropping a document at a department block,
+/// handing over a marketplace trade, taking a hostel key to a caretaker. Food
+/// is deliberately excluded: food has its own directory, and a cold plate of
+/// rice is a bad errand. The poster sets pickup, drop-off and fee; a mover
+/// claims it, does it, and the poster confirms.
+model Errand {
+  id          String    @id @default(cuid())
+  posterId    String
+  poster      User      @relation("ErrandPoster", fields: [posterId], references: [id], onDelete: Cascade)
+  // The student who claimed the task, filled when someone accepts.
+  claimedById String?
+  claimedBy   User?     @relation("ErrandClaimer", fields: [claimedById], references: [id], onDelete: SetNull)
+  claimedAt   DateTime?
+
+  institutionId String
+  institution   Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+
+  title       String
+  description String
+  // NON-FOOD categories only: Document Drop, Item Handover, Key Drop-off,
+  // Printing & Photocopy, Queue Stand-in, Other.
+  category    String
+
+  // The logistics triple: collect here, deliver there, paid this much.
+  pickupPoint  String
+  dropOffPoint String
+  feeKobo      Int
+  isNegotiable Boolean   @default(false)
+  dueAt        DateTime?
+
+  status ErrandStatus @default(OPEN)
+
+  // SPONSORED LISTING HOOK: a boosted errand is pinned to the top.
+  isSponsored    Boolean   @default(false)
+  sponsoredUntil DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([institutionId, status])
+  @@index([category])
+  @@index([isSponsored])
+}
+
+// ===========================================================================
+// URGENT 2K - PEER-TO-PEER GOODWILL BOARD (no lending, no fees, no escrow)
+// ===========================================================================
+//
+// WHAT THIS IS NOT: the platform is never a lender, never a credit provider
+// and never holds anyone's money. There is no treasury pool, no interest, no
+// service fee and no repayment obligation - because nothing is ever lent.
+//
+// WHAT IT IS: a student asks classmates for help with a small, real
+// emergency. Another student chooses to help and sends the money straight
+// from their own bank app to the requester's own bank account. The platform
+// only does three things: verify identities, protect dignity through
+// anonymity, and record who actually followed through.
+//
+// The two anti-abuse rules live here:
+//   1. A helper who unlocks a classmate's identity and bank details is
+//      committing to send. Ghosting after that is a privacy violation, so it
+//      costs them 7 days away from the board (GoodwillRecord.boardBannedUntil).
+//   2. A requester can never be publicly flagged, ranked or shamed. Asking
+//      for help carries no penalty of any kind.
+
+/// PRIVATE GOODWILL RECORD: one row per student. Tracks how often they
+/// followed through on help they committed to, how often they let someone
+/// down, and any active board ban. Never shown to other students - only the
+/// owner sees their own counts, and admins see them for moderation.
+model GoodwillRecord {
+  userId String @id
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Times this student said "I have sent the funds" and the recipient agreed.
+  helpsCompleted Int @default(0)
+  // Times this student unlocked someone's details and never followed through.
+  helpsAbandoned Int @default(0)
+  // Times this student confirmed money arrived. Used for the "Grateful" badge.
+  requestsReceived Int @default(0)
+
+  /// SNOOPER PENALTY: while this timestamp is in the future the student cannot
+  /// open the support board or commit to anything. Set to 7 days out when a
+  /// transfer timer expires without the helper marking funds sent.
+  boardBannedUntil DateTime?
+  /// Why the ban was applied, so admins can review it fairly.
+  banReason String?
+
+  updatedAt DateTime @updatedAt
+}
+
+/// ONE HELP OFFER. A request can collect several of these over time - each one
+/// is one student's commitment, with its own 2-hour timer and outcome. Keeping
+/// them separate is what makes the snooper penalty auditable: we can prove
+/// exactly who unlocked what, when, and what they did next.
+model GoodwillHelp {
+  id        String @id @default(cuid())
+  requestId String
+  request   GoodwillRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  helperId  String
+  helper    User            @relation("GoodwillHelper", fields: [helperId], references: [id], onDelete: Cascade)
+
+  status GoodwillStatus @default(COMMITTED)
+
+  /// The moment the commitment notice was accepted and details were revealed.
+  committedAt DateTime  @default(now())
+  /// committedAt + 2 hours. If this passes while still COMMITTED, the snooper
+  /// penalty is applied.
+  expiresAt DateTime
+  /// When the helper marked "I have sent the funds".
+  sentAt DateTime?
+  /// When the recipient confirmed the money landed.
+  confirmedAt DateTime?
+  /// Optional note the helper leaves, e.g. "Sent from my GTB account".
+  note String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // One active offer per helper per request - no double-claiming, but a
+  // helper who was released may offer again later.
+  @@unique([requestId, helperId])
+  @@index([helperId, status])
+  @@index([status, expiresAt])
+}
+
+/// ONE GOODWILL REQUEST. Posted by a student in need. Shown to browsers as
+/// `alias` + `story` + amount only; the identity and bank details are locked
+/// until a helper accepts the commitment notice.
+model GoodwillRequest {
+  id            String @id @default(cuid())
+  institutionId String
+  institution   Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+
+  requesterId String
+  requester   User   @relation("GoodwillRequester", fields: [requesterId], references: [id], onDelete: Cascade)
+
+  /// ANONYMOUS DISPLAY METADATA: what the public board shows instead of a name.
+  alias String // e.g. "Student #4821"
+  /// The situation, in the requester's own words. Moderated, never financial
+  /// advice, never a promise of anything in return.
+  story String
+  /// How much they are hoping to raise, in kobo. A hope, not a debt - nobody
+  /// is ever obliged to repay a goodwill gift.
+  amountKobo Int
+
+  status GoodwillStatus @default(OPEN)
+
+  // Payout details, AES-encrypted at rest exactly like matric numbers.
+  // Revealed to a helper only after the commitment notice is accepted, and
+  // only after the account name has been matched against the student ID.
+  bankName String
+  bankAccountNumberEnc String
+  bankAccountNameEnc String
+
+  /// The helper currently holding an active commitment, if any. Denormalised
+  /// from GoodwillHelp so the board can show "someone is on it" in one query.
+  activeHelpId String?
+
+  receivedAt DateTime?
+  /// Set when the requester withdraws or releases a helper.
+  closedAt DateTime?
+  adminNote String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  helps GoodwillHelp[]
+
+  @@index([institutionId, status])
+  @@index([requesterId, status])
+  @@index([status])
+}

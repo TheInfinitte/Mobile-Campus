@@ -1,0 +1,50 @@
+{
+  "name": "Mobile Campus",
+  "short_name": "MobileCampus",
+  "description": "Verified off-campus housing, a student marketplace, micro-gigs with escrow and an AI budget assistant for DELSU, Abraka students.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f8fafc",
+  "theme_color": "#4f46e5",
+  "lang": "en-NG",
+  "categories": ["education", "shopping", "lifestyle"],
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Find a lodge",
+      "short_name": "Housing",
+      "description": "Browse verified off-campus housing around DELSU",
+      "url": "/housing",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Marketplace",
+      "short_name": "Market",
+      "description": "Buy and sell with other students",
+      "url": "/market",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "AI Budget Assistant",
+      "short_name": "Budget AI",
+      "description": "Tell it what you have and see what you can afford",
+      "url": "/budget",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }]
+    }
+  ]
+}

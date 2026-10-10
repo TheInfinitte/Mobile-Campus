@@ -1,0 +1,198 @@
+/**
+ * src/app/globals.css
+ * WHAT: The global stylesheet. Imports Tailwind, defines CSS variables and
+ *       sets the base look of the app.
+ * WHY : Tailwind gives us utilities, but a few things (scroll behaviour, focus
+ *       rings, the reduced-motion rule, the shimmer skeleton) are cleaner as
+ *       plain CSS that applies everywhere.
+ */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* -------------------------------------------------------------------------
+   CSS VARIABLES
+   Keeping the brand colours here too means non-Tailwind code (inline styles,
+   SVG fills, the PWA theme colour) can use the same palette.
+   ------------------------------------------------------------------------- */
+:root {
+  --mc-primary: #4f46e5;      /* Indigo 600 */
+  --mc-primary-dark: #312e81; /* Indigo 900 */
+  --mc-gold: #f59e0b;         /* Gold 500 */
+  --mc-slate: #0f172a;        /* Slate 900 */
+  --mc-surface: #f8fafc;      /* Slate 50 - the app background */
+  --mc-nav-height: 4.5rem;    /* Height of the mobile bottom navigation */
+}
+
+/* -------------------------------------------------------------------------
+   BASE
+   ------------------------------------------------------------------------- */
+@layer base {
+  html {
+    /* Smooth anchor scrolling, but respect users who prefer no motion. */
+    scroll-behavior: smooth;
+    -webkit-text-size-adjust: 100%; /* Stops iOS zooming text sideways. */
+  }
+
+  body {
+    @apply bg-slate-50 text-slate-900 antialiased;
+    /* Prevent horizontal scrolling on narrow phones (a classic 360px bug). */
+    overflow-x: hidden;
+  }
+
+  /* Every focusable element gets a clear, visible focus ring. This is an
+     accessibility requirement, not a style preference. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-primary-500 ring-offset-2 ring-offset-white;
+  }
+
+  /* Remove the blue tap highlight on mobile; we use our own press animation. */
+  a,
+  button {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* Inputs must be at least 16px or iOS Safari zooms the whole page on focus. */
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
+}
+
+/* -------------------------------------------------------------------------
+   COMPONENT HELPERS
+   Reusable class groups so cards and buttons look identical everywhere.
+   ------------------------------------------------------------------------- */
+@layer components {
+  /* The standard card: white, rounded, soft shadow, generous padding. */
+  .mc-card {
+    @apply rounded-2xl bg-white p-4 shadow-card;
+  }
+
+  /* A small pill/chip used for filters, badges and tags. */
+  .mc-chip {
+    @apply inline-flex min-h-[32px] items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-medium text-slate-700;
+  }
+
+  /* The gold "Verified" badge. */
+  .mc-badge-verified {
+    @apply inline-flex items-center gap-1 rounded-full bg-gold-50 px-2.5 py-1 text-[11px] font-semibold text-gold-800 ring-1 ring-inset ring-gold-200;
+  }
+
+  /* Primary button: 44px tall minimum, the required touch target size. */
+  .mc-btn-primary {
+    @apply inline-flex min-h-[44px] items-center justify-center gap-2 rounded-xl bg-primary-600 px-5 text-sm font-semibold text-white transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  /* Secondary button: same size, quieter colour. */
+  .mc-btn-secondary {
+    @apply inline-flex min-h-[44px] items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-5 text-sm font-semibold text-slate-800 transition active:scale-[0.98] disabled:opacity-50;
+  }
+
+  /* Danger button for reporting scams and cancelling deals. */
+  .mc-btn-danger {
+    @apply inline-flex min-h-[44px] items-center justify-center gap-2 rounded-xl bg-danger px-5 text-sm font-semibold text-white transition active:scale-[0.98] disabled:opacity-50;
+  }
+
+  /* Text input / select. 44px tall for comfortable tapping. */
+  .mc-input {
+    @apply min-h-[44px] w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-primary-400 focus:ring-2 focus:ring-primary-100 focus:outline-none;
+  }
+
+  /* Label above an input. */
+  .mc-label {
+    @apply mb-1.5 block text-xs font-semibold uppercase tracking-wide text-slate-500;
+  }
+
+  /* Skeleton block used by loading states. */
+  .mc-skeleton {
+    @apply relative overflow-hidden rounded-xl bg-slate-200;
+  }
+
+  /* Screen title at the top of a page. */
+  .mc-page-title {
+    @apply text-2xl font-bold tracking-tight text-slate-900;
+  }
+
+  /* Subtitle under a page title. */
+  .mc-page-subtitle {
+    @apply mt-1 text-sm text-slate-500;
+  }
+}
+
+/* -------------------------------------------------------------------------
+   SKELETON SHIMMER
+   The moving highlight that makes a loading placeholder feel alive.
+   ------------------------------------------------------------------------- */
+.mc-skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background-image: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0) 0,
+    rgba(255, 255, 255, 0.5) 50%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  animation: shimmer 1.6s infinite;
+}
+
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+/* -------------------------------------------------------------------------
+   SCROLLBAR
+   Thin and unobtrusive - a fat scrollbar wastes precious mobile width.
+   ------------------------------------------------------------------------- */
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.hide-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Hide the number input spinners - they waste space on mobile. */
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+/* -------------------------------------------------------------------------
+   ACCESSIBILITY: REDUCED MOTION
+   Some users get motion sickness. When their system asks for reduced motion we
+   remove animations and transitions entirely. Framer Motion also checks this
+   in code, but this covers CSS animations too.
+   ------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .mc-skeleton::after {
+    animation: none;
+  }
+}
+
+/* -------------------------------------------------------------------------
+   SAFE AREA
+   On phones with a home indicator bar (iPhone X and newer) the fixed bottom
+   navigation must sit above it, not underneath.
+   ------------------------------------------------------------------------- */
+.pb-safe {
+  padding-bottom: calc(var(--mc-nav-height) + env(safe-area-inset-bottom, 0px));
+}
